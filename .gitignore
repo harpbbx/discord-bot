@@ -1,0 +1,6 @@
+node_modules
+.env
+paypal-qr.png
+database.json
+steam_games_cache.json
+prices.json
