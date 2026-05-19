@@ -903,26 +903,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.user.id !== userId) return interaction.reply({ content: '❌ Only the ticket owner can accept the rules.', ephemeral: true });
     const session = userSessions.get(userId);
     if (!session?.channelId) return interaction.reply({ content: '❌ Session not found.', ephemeral: true });
-    const ticketChannel = interaction.guild.channels.cache.get(session.channelId);
-    if (!ticketChannel) return interaction.reply({ content: '❌ Ticket channel not found.', ephemeral: true });
-    try { const rulesMsg = await ticketChannel.messages.fetch(session.rulesMsgId); await rulesMsg.edit({ components: [] }); } catch { }
-    await sendTicketButtons(ticketChannel, interaction.user, session.reason, session);
-    await interaction.reply({ content: '✅ You have agreed to the rules.', ephemeral: true });
+    session.rulesAccepted = true;
+    userSessions.set(userId, session);
+    // Trasforma il messaggio delle regole direttamente nel menu principale (zero messaggi extra)
+    const step = session.reason === 'reason_purchase' ? 'main_purchase' : 'main_support';
+    const menuData = buildMenuStep(step, session);
+    await interaction.update({ content: `✅ ${interaction.user} you have agreed to the rules. Use the menu below to proceed.`, ...menuData });
+    session.menuMessageId = interaction.message.id;
+    userSessions.set(userId, session);
+    return;
   }
 
   // ═══════════════════════════════════════════════════════
   // MENU NAVIGABILE — gestione centralizzata dei menu_* btn
   // ═══════════════════════════════════════════════════════
 
-  // Helper per aggiornare il messaggio menu nella sessione
+  // Aggiorna il messaggio menu tramite interaction.update() — solo per bottoni
   async function updateMenu(interaction, step, extra = {}) {
     const session = userSessions.get(interaction.user.id);
     const menuData = buildMenuStep(step, session, extra);
-    // Se il menu ha files (es. PayPal QR), non si può fare update diretto — fallback a reply
-    if (menuData.files) {
-      await interaction.update({ embeds: menuData.embeds, components: menuData.components, content: '' });
-    } else {
-      await interaction.update({ embeds: menuData.embeds || [], components: menuData.components || [], content: '', files: [] });
+    const { files, ...rest } = menuData;
+    await interaction.update({ content: '', files: [], ...rest });
+  }
+
+  // Aggiorna il messaggio menu tramite message.edit() — per i modal (che non supportano update)
+  async function editMenuMessage(interaction, userId, step, extra = {}) {
+    const session = userSessions.get(userId);
+    const menuData = buildMenuStep(step, session, extra);
+    const channel = interaction.guild.channels.cache.get(session?.channelId);
+    if (!channel || !session?.menuMessageId) return;
+    try {
+      const msg = await channel.messages.fetch(session.menuMessageId);
+      const { files, ...rest } = menuData;
+      await msg.edit({ content: '', files: [], ...rest });
+    } catch (e) {
+      console.error('editMenuMessage error:', e.message);
     }
   }
 
@@ -1001,8 +1016,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const session = userSessions.get(interaction.user.id) || {};
     session.requestedGames = requestedGames;
     userSessions.set(interaction.user.id, session);
-    const menuData = buildMenuStep('choose_login', session);
-    await interaction.reply({ content: '✅ Purchase form submitted! Now choose how to provide login info.', ...menuData });
+    await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Form submitted!', ephemeral: true }));
+    await editMenuMessage(interaction, interaction.user.id, 'choose_login');
     return;
   }
 
@@ -1041,9 +1056,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const priceButtonRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`set_price_${interaction.user.id}`).setLabel('💰 Set Price (EUR)').setStyle(ButtonStyle.Primary));
       await interaction.channel.send({ content: `${ownerRole}`, components: [priceButtonRow] });
     }
-    // Aggiorna il menu al messaggio precedente (awaiting_price)
-    const menuData = buildMenuStep('awaiting_price', session);
-    await interaction.reply({ content: '✅ Credentials saved. Waiting for the owner to set the price...', ...menuData });
+    // Aggiorna il menu ad awaiting_price (edita il messaggio esistente, nessun nuovo messaggio)
+    await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Credentials saved!', ephemeral: true }));
+    await editMenuMessage(interaction, interaction.user.id, 'awaiting_price');
     return;
   }
 
@@ -1221,7 +1236,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       new ButtonBuilder().setCustomId(`owner_deny_payment_${interaction.user.id}`).setLabel('❌ Deny Payment').setStyle(ButtonStyle.Danger)
     );
     await interaction.channel.send({ content: ownerRole ? `${ownerRole}` : '', embeds: [embed], components: [row] });
-    await interaction.reply({ content: '✅ Payment reported! Staff will verify shortly.', ephemeral: true });
+    // Aggiorna il menu ad "awaiting_payment_verification" — zero nuovi messaggi al cliente
+    await updateMenu(interaction, 'awaiting_payment_verification');
+    return;
   }
 
   if (interaction.isButton() && interaction.customId.startsWith('owner_confirm_paypal_')) {
@@ -1389,12 +1406,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
 
-    const clientEmbed = new EmbedBuilder()
-      .setTitle('⏳ Transaction Hash Submitted')
-      .setDescription(`Your transaction hash has been submitted!\n\n\`${hash}\`\n\n⏳ The owner will verify your payment and confirm shortly.\n📌 Please stay in this ticket for updates.`)
-      .setColor(0xFEE75C).setTimestamp();
-    await interaction.reply({ embeds: [clientEmbed] });
-
     const ownerEmbed = new EmbedBuilder()
       .setTitle('🔍 Crypto Payment — Manual Verification Required')
       .setDescription('A customer has submitted a transaction hash. Please verify it manually.')
@@ -1414,6 +1425,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       new ButtonBuilder().setCustomId(`owner_deny_crypto_${interaction.user.id}`).setLabel('❌ Deny Payment').setStyle(ButtonStyle.Danger)
     );
     await interaction.channel.send({ content: ownerRole ? `${ownerRole}` : '', embeds: [ownerEmbed], components: [row] });
+
+    // Aggiorna il menu a "awaiting verification" senza creare nuovi messaggi
+    await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Hash submitted!', ephemeral: true }));
+    await editMenuMessage(interaction, interaction.user.id, 'awaiting_payment_verification');
   }
 
   // ── OWNER: conferma pagamento crypto ──
@@ -1494,14 +1509,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const deniedEmbed = new EmbedBuilder().setTitle('❌ Crypto Payment Denied').setDescription(`${user}'s payment denied.\n**Reason:** ${reason}`).setColor(0xED4245).setTimestamp();
     const disabledRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('disabled').setLabel('❌ Payment Denied').setStyle(ButtonStyle.Danger).setDisabled(true));
     await interaction.update({ embeds: [deniedEmbed], components: [disabledRow] });
-    const ticketChannel = interaction.guild.channels.cache.get(session?.channelId);
-    if (ticketChannel) {
-      const retryRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('i_have_paid').setLabel('🔄 Submit New Hash').setStyle(ButtonStyle.Primary));
-      await ticketChannel.send({ content: `${user}`, embeds: [new EmbedBuilder().setTitle('❌ Payment Not Confirmed').setDescription(`Your **${session?.selectedCoin}** payment could not be verified.\n**Reason:** ${reason}\n\nPlease submit a new transaction hash.`).setColor(0xED4245)], components: [retryRow] });
+    // Ripristina il menu del cliente al passo "i_have_paid" per permettere retry
+    if (session?.menuMessageId) {
+      const ticketChannel = interaction.guild.channels.cache.get(session?.channelId);
+      if (ticketChannel) {
+        try {
+          const menuMsg = await ticketChannel.messages.fetch(session.menuMessageId);
+          const coin = session.selectedCoin;
+          const data = cryptoData[coin];
+          const net = data?.networks.find(n => n.name === session.selectedNetwork) || data?.networks[0];
+          const cryptoAmounts = await convertEurToCrypto(session.priceEur);
+          const retryEmbed = new EmbedBuilder()
+            .setTitle('❌ Payment Denied — Retry')
+            .setDescription(`Your **${coin}** payment was denied.\n**Reason:** ${reason}\n\nPlease submit a new transaction hash.`)
+            .setColor(0xED4245);
+          const retryRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('menu_i_have_paid').setLabel('🔄 Submit New Hash').setStyle(ButtonStyle.Primary)
+          );
+          await menuMsg.edit({ embeds: [retryEmbed], components: [retryRow], content: '' });
+        } catch { }
+      }
     }
   }
 
-  // MODIFICA 4: "Order Delivered" → chiedi recensione al cliente
+  // "Order Delivered" → aggiorna il menu del cliente al review_prompt
   if (interaction.isButton() && interaction.customId.startsWith('order_delivered_')) {
     const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
     if (!interaction.member.roles.cache.has(ownerRole?.id)) return interaction.reply({ content: '❌ Only the Owner can mark orders as delivered.', ephemeral: true });
@@ -1514,46 +1545,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
     );
     await interaction.update({ components: [disabledRow] });
 
-    const customer = await interaction.guild.members.fetch(userId).catch(() => null);
-    const ticketChannel = interaction.guild.channels.cache.get(session?.channelId || interaction.channelId);
-
-    if (ticketChannel && customer) {
-      const reviewRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('leave_review').setLabel('✍️ Leave a Review').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('skip_review').setLabel('❌ Skip & Close').setStyle(ButtonStyle.Secondary)
-      );
-      await ticketChannel.send({
-        content: `${customer}`,
-        embeds: [new EmbedBuilder()
-          .setTitle('🎉 Order Delivered!')
-          .setDescription(`Your order has been delivered! 🎮\n\nWe hope you enjoy your game!\n\n**Would you like to leave a review?**\nIt only takes a minute and helps us grow! 🙏`)
-          .setColor(0x57F287).setTimestamp()
-        ],
-        components: [reviewRow]
-      });
+    // Aggiorna il menu del cliente al review_prompt — nessun messaggio extra
+    if (session?.menuMessageId) {
+      const ticketChannel = interaction.guild.channels.cache.get(session?.channelId);
+      if (ticketChannel) {
+        try {
+          const customer = await interaction.guild.members.fetch(userId).catch(() => null);
+          const menuMsg = await ticketChannel.messages.fetch(session.menuMessageId);
+          const menuData = buildMenuStep('review_prompt', session);
+          await menuMsg.edit({ content: customer ? `${customer}` : '', ...menuData });
+        } catch { }
+      }
     }
     await interaction.followUp({ content: '✅ Order marked as delivered. Customer has been notified.', ephemeral: true });
+    return;
   }
 
-  // ── REVIEW MODAL ──
-  if (interaction.isButton() && interaction.customId === 'leave_review') {
+  // ── REVIEW: menu_leave_review ──
+  if (interaction.isButton() && interaction.customId === 'menu_leave_review') {
     const session = userSessions.get(interaction.user.id);
     if (!session) return interaction.reply({ content: '❌ Session expired.', ephemeral: true });
     if (!session.paymentConfirmed) return interaction.reply({ content: '❌ Payment not confirmed yet.', ephemeral: true });
-
     const modal = new ModalBuilder().setCustomId('modal_review_with_stars').setTitle('📝 Write your Review');
     modal.addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('review_text').setLabel('Your experience with our service')
           .setStyle(TextInputStyle.Paragraph).setPlaceholder('Share your experience with this purchase and our support...').setRequired(true).setMaxLength(1000)
       ),
-      // MODIFICA 5: validazione stelle nel label
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('rating_stars').setLabel('Rating — Enter a number from 1 to 5')
           .setStyle(TextInputStyle.Short).setPlaceholder('Enter 1, 2, 3, 4 or 5').setRequired(true).setMinLength(1).setMaxLength(1)
       )
     );
     await interaction.showModal(modal);
+    return;
+  }
+
+  // ── menu_skip_review ──
+  if (interaction.isButton() && interaction.customId === 'menu_skip_review') {
+    const session = userSessions.get(interaction.user.id);
+    const channelId = session?.channelId || interaction.channelId;
+    const channel = interaction.guild.channels.cache.get(channelId);
+    await updateMenu(interaction, 'awaiting_payment_verification'); // congela il menu
+    await closeTicket(interaction.guild, channel, interaction.user, session);
+    return;
   }
 
   if (interaction.isModalSubmit() && interaction.customId === 'modal_review_with_stars') {
@@ -1561,7 +1596,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const starsRaw = interaction.fields.getTextInputValue('rating_stars').trim();
     const stars = parseInt(starsRaw);
 
-    // MODIFICA 5: validazione rating
     if (isNaN(stars) || stars < 1 || stars > 5 || starsRaw.length !== 1) {
       return interaction.reply({
         content: '❌ **Invalid rating!** Please enter only a number between **1** and **5** (e.g., 1, 2, 3, 4 or 5).',
@@ -1575,16 +1609,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
     session.stars = stars;
     userSessions.set(interaction.user.id, session);
 
-    // Gioco preso automaticamente dalla sessione
     const game = session.requestedGames || 'Unknown Game';
 
-    await interaction.reply({ content: 'Publishing your review...', ephemeral: true });
+    // Congela il menu prima di procedere
+    await interaction.deferUpdate().catch(() => interaction.reply({ content: '⏳ Publishing review...', ephemeral: true }));
+    await editMenuMessage(interaction, interaction.user.id, 'awaiting_payment_verification');
 
     const starsLabel = ['', '⭐', '⭐⭐', '⭐⭐⭐', '⭐⭐⭐⭐', '⭐⭐⭐⭐⭐'];
     const colors = [null, 0xED4245, 0xE67E22, 0xFEE75C, 0x57F287, 0x00FF7F];
     const coverUrl = await getCoverImage(game.split('\n')[0]);
     const reviewChannel = interaction.guild.channels.cache.find(ch => ch.name === process.env.REVIEW_CHANNEL_NAME);
-    if (!reviewChannel) return interaction.editReply({ content: '❌ Review channel not found!' });
+    if (!reviewChannel) return;
 
     allRatings.push(stars);
     const userId = interaction.user.id;
@@ -1615,7 +1650,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const ticketChannel = interaction.guild.channels.cache.get(session.channelId || interaction.channelId);
     if (ticketChannel) {
       await sendTranscript(interaction.guild, ticketChannel, interaction.user, { game, text: reviewText, stars }, session?.openTime, session?.reason, session?.number);
-      await ticketChannel.send({ content: `✅ Thank you ${interaction.user}! Your review has been posted.\n\n🗑️ *This channel will be deleted in 5 seconds...*` });
       openTickets = Math.max(0, openTickets - 1);
       closedToday++;
       setTimeout(async () => { try { await ticketChannel.delete(); } catch (err) { console.error(err.message); } }, 5000);
@@ -1625,31 +1659,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await updateRatingVoice(interaction.guild);
     await updateDashboard(interaction.guild);
     await updateTopBuyers(interaction.guild);
-    await interaction.editReply({ content: '✅ Review published! Ticket closed.' });
   }
 
-  // ── BUTTON: close ticket ──
+  // ── BUTTON: close ticket — aggiorna il menu alla review_prompt ──
   if (interaction.isButton() && interaction.customId === 'close_ticket') {
     const session = userSessions.get(interaction.user.id) || {};
-    session.channelId = interaction.channelId;
+    session.channelId = session.channelId || interaction.channelId;
+    session.menuMessageId = session.menuMessageId || interaction.message.id;
     userSessions.set(interaction.user.id, session);
-    const embed = new EmbedBuilder()
-      .setTitle('⭐ Leave a Review!')
-      .setDescription('Thank you for your ticket! 🎉\n\nWould you like to leave a review before closing?')
-      .setColor(0x57F287);
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('leave_review').setLabel('✍️ Write a Review').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('skip_review').setLabel('❌ Skip & Close').setStyle(ButtonStyle.Secondary)
-    );
-    await interaction.reply({ embeds: [embed], components: [row] });
+    // Se il pagamento è confermato, mostra review prompt nel menu; altrimenti chiudi direttamente
+    if (session.paymentConfirmed) {
+      await updateMenu(interaction, 'review_prompt');
+    } else {
+      await updateMenu(interaction, 'awaiting_payment_verification');
+      const channel = interaction.guild.channels.cache.get(session.channelId);
+      await closeTicket(interaction.guild, channel, interaction.user, session);
+    }
+    return;
   }
 
+  // Vecchio skip_review (fallback per eventuali messaggi rimasti) + menu_skip_review già gestito sopra
   if (interaction.isButton() && interaction.customId === 'skip_review') {
     const session = userSessions.get(interaction.user.id);
     const channelId = session?.channelId || interaction.channelId;
     const channel = interaction.guild.channels.cache.get(channelId);
-    await interaction.reply({ content: '🔒 Ticket closing in 5 seconds...' });
+    await interaction.update({ components: [] });
     await closeTicket(interaction.guild, channel, interaction.user, session);
+    return;
   }
 
   // ── REOPEN TICKET ──
