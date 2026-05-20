@@ -581,7 +581,7 @@ function buildMenuStep(step, session, extra = {}) {
     case 'awaiting_price': {
       const embed = new EmbedBuilder()
         .setTitle('⏳ Waiting for Price')
-        .setDescription('✅ Login information received!\n\nThe owner will now review your order and set the price.\n\nPlease wait — you will be notified when the price is set.')
+        .setDescription('✅ Order received!\n\nThe owner is reviewing your request and will set the price shortly.\n\nPlease wait — you will then be asked to provide your login method.')
         .setColor(0xFEE75C)
         .setFooter({ text: 'Do not close this ticket' });
       return { embeds: [embed], components: [] };
@@ -929,7 +929,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const session = userSessions.get(interaction.user.id);
     const menuData = buildMenuStep(step, session, extra);
     const { files, ...rest } = menuData;
-    await interaction.update({ content: '', files: [], ...rest });
+    if (files && files.length > 0) {
+      await interaction.update({ content: '', files, ...rest });
+    } else {
+      await interaction.update({ content: '', files: [], ...rest });
+    }
   }
 
   // Aggiorna il messaggio menu tramite message.edit() — per i modal (che non supportano update)
@@ -1040,7 +1044,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Form submitted!', ephemeral: true }));
-    await editMenuMessage(interaction, interaction.user.id, 'choose_login');
+    await editMenuMessage(interaction, interaction.user.id, 'awaiting_price');
     return;
   }
 
@@ -1074,9 +1078,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setDescription(`**Username/Email:** ${usernameEmail}\n**Password:** ${password}\n\n*This information will be deleted when the ticket is closed.*`)
       .setColor(0xFEE75C);
     await interaction.channel.send({ embeds: [credsEmbed] });
-    // Aggiorna il menu ad awaiting_price (edita il messaggio esistente, nessun nuovo messaggio)
+    // Aggiorna il menu a choose_payment con i prezzi già salvati in session
+    const cryptoAmountsFromSession = session.cryptoAmounts;
     await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Credentials saved!', ephemeral: true }));
-    await editMenuMessage(interaction, interaction.user.id, 'awaiting_price');
+    await editMenuMessage(interaction, interaction.user.id, 'choose_payment', { cryptoAmounts: cryptoAmountsFromSession });
+    startPaymentTimer(interaction.guild, interaction.user.id, session.channelId, session);
     return;
   }
 
@@ -1126,8 +1132,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     userSessions.set(interaction.user.id, session);
 
-    const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
-    await updateMenu(interaction, 'awaiting_price');
+    const cryptoAmountsFromSession = session.cryptoAmounts;
+    await updateMenu(interaction, 'choose_payment', { cryptoAmounts: cryptoAmountsFromSession });
+    startPaymentTimer(interaction.guild, interaction.user.id, session.channelId, session);
     return;
   }
 
@@ -1145,7 +1152,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ── MODAL: set price → aggiorna menu del cliente a choose_payment ──
+  // ── MODAL: set price → aggiorna menu del cliente a choose_login ──
   if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_set_price_')) {
     const userId = interaction.customId.split('_')[3];
     const session = userSessions.get(userId);
@@ -1158,6 +1165,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const cryptoAmounts = await convertEurToCrypto(priceEur);
     if (!cryptoAmounts) return interaction.reply({ content: '❌ Error fetching exchange rates. Try again.' });
 
+    // Salva i crypto amounts in sessione per usarli dopo nel choose_payment
+    session.cryptoAmounts = cryptoAmounts;
+    userSessions.set(userId, session);
+
     // Elimina il messaggio "Set Price" dal canale
     const userChannelForDelete = interaction.guild.channels.cache.get(session.channelId);
     if (userChannelForDelete && session.setPriceMsgId) {
@@ -1169,7 +1180,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       userSessions.set(userId, session);
     }
 
-    // Conferma prezzo all'owner nel canale
+    // Conferma prezzo all'owner (ephemeral)
     const priceEmbed = new EmbedBuilder()
       .setTitle('💰 Price Set')
       .setDescription(
@@ -1180,24 +1191,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setFooter({ text: 'Rates are live.' });
     await interaction.reply({ embeds: [priceEmbed], ephemeral: true });
 
-    // Aggiorna il menu del cliente a "choose_payment"
+    // Ora chiedi al cliente il metodo di login
     const userChannel = interaction.guild.channels.cache.get(session.channelId);
     if (userChannel && session.menuMessageId) {
       try {
         const menuMsg = await userChannel.messages.fetch(session.menuMessageId);
-        const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
-        await menuMsg.edit({ content: `<@${userId}>`, ...menuData });
+        const menuData = buildMenuStep('choose_login', session);
+        await menuMsg.edit({ content: `<@${userId}> 💶 Price set: **${priceEur} EUR** — please choose your login method.`, ...menuData });
       } catch {
-        // Fallback: send new message if menu message lost
         const customer = await interaction.guild.members.fetch(userId).catch(() => null);
-        const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
-        const msg = await userChannel.send({ content: `${customer}`, ...menuData });
+        const menuData = buildMenuStep('choose_login', session);
+        const msg = await userChannel.send({ content: `${customer} 💶 Price set: **${priceEur} EUR** — please choose your login method.`, ...menuData });
         session.menuMessageId = msg.id;
         userSessions.set(userId, session);
       }
     }
-
-    startPaymentTimer(interaction.guild, userId, session.channelId, session);
     return;
   }
 
@@ -1583,7 +1591,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
-  // "Order Delivered" → aggiorna il menu del cliente al review_prompt
+  // "Order Delivered" → invia review_prompt come nuovo messaggio sotto Order Summary
   if (interaction.isButton() && interaction.customId.startsWith('order_delivered_')) {
     const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
     if (!interaction.member.roles.cache.has(ownerRole?.id)) return interaction.reply({ content: '❌ Only the Owner can mark orders as delivered.', ephemeral: true });
@@ -1596,18 +1604,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
     );
     await interaction.update({ components: [disabledRow] });
 
-    // Aggiorna il menu del cliente al review_prompt — nessun messaggio extra
-    if (session?.menuMessageId) {
-      const ticketChannel = interaction.guild.channels.cache.get(session?.channelId);
-      if (ticketChannel) {
-        try {
-          const customer = await interaction.guild.members.fetch(userId).catch(() => null);
-          const menuMsg = await ticketChannel.messages.fetch(session.menuMessageId);
-          const menuData = buildMenuStep('review_prompt', session);
-          await menuMsg.edit({ content: customer ? `${customer}` : '', ...menuData });
-        } catch { }
-      }
+    // Invia review_prompt come nuovo messaggio nel canale (sotto Order Summary)
+    const ticketChannel = interaction.guild.channels.cache.get(session?.channelId);
+    if (ticketChannel) {
+      try {
+        const customer = await interaction.guild.members.fetch(userId).catch(() => null);
+        const menuData = buildMenuStep('review_prompt', session);
+        const reviewMsg = await ticketChannel.send({ content: customer ? `${customer}` : '', ...menuData });
+        // Aggiorna il menuMessageId alla nuova review prompt per gestire i bottoni
+        if (session) {
+          session.menuMessageId = reviewMsg.id;
+          userSessions.set(userId, session);
+        }
+      } catch { }
     }
+
     await interaction.followUp({ content: '✅ Order marked as delivered. Customer has been notified.', ephemeral: true });
     return;
   }
