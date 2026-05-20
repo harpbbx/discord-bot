@@ -817,6 +817,13 @@ client.once(Events.ClientReady, async () => {
         { name: 'utente', type: 6, description: 'User', required: true },
         { name: 'limite', type: 4, description: 'Max tickets per day (0 = ban from tickets)', required: true }
       ]
+    },
+    {
+      name: 'purge',
+      description: 'Cancella tutti i messaggi del canale (Owner only)',
+      options: [
+        { name: 'canale', type: 7, description: 'Canale da svuotare (default: canale corrente)', required: false }
+      ]
     }
   ];
   for (const guild of client.guilds.cache.values()) {
@@ -878,6 +885,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
       blacklist.delete(target.id);
       await updateBlacklist(interaction.guild);
       await interaction.reply({ content: `✅ ${target} has been removed from the blacklist.`, ephemeral: true });
+    }
+
+    // ── purge ──
+    else if (interaction.commandName === 'purge') {
+      const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
+      if (!interaction.member.roles.cache.has(ownerRole?.id))
+        return interaction.reply({ content: '❌ Solo l\'Owner può usare questo comando.', ephemeral: true });
+
+      const target = interaction.options.getChannel('canale') || interaction.channel;
+      if (!target || target.type !== 0 /* GuildText */)
+        return interaction.reply({ content: '❌ Canale non valido.', ephemeral: true });
+
+      await interaction.deferReply({ ephemeral: true });
+
+      let deleted = 0;
+      let batch;
+      do {
+        batch = await target.messages.fetch({ limit: 100 });
+        if (batch.size === 0) break;
+        // Discord permette bulkDelete solo per messaggi < 14 giorni
+        const recent = batch.filter(m => Date.now() - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
+        const old14   = batch.filter(m => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
+        if (recent.size > 0) await target.bulkDelete(recent, true);
+        for (const m of old14.values()) await m.delete().catch(() => {});
+        deleted += batch.size;
+        await new Promise(r => setTimeout(r, 500)); // anti-ratelimit
+      } while (batch.size >= 2);
+
+      await interaction.editReply({ content: `🗑️ Cancellati **${deleted}** messaggi da <#${target.id}>.` });
     }
 
     // MODIFICA 8: comando setlimit
