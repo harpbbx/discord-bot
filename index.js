@@ -409,13 +409,43 @@ async function updateTopBuyers(guild) {
       ? sorted.map(([, data], i) => `${medals[i] || `**${i + 1}.**`} <@${data.userId}> — **${data.count}** purchase${data.count > 1 ? 's' : ''}`).join('\n')
       : 'No purchases yet.';
     const embed = new EmbedBuilder().setTitle('🏆 Top 10 Buyers').setDescription(list).setColor(0xFEE75C).setFooter({ text: 'Last updated' }).setTimestamp();
+
+    // 1) Prova a editare il messaggio già salvato nel DB
     if (topReviewsMessageId) {
-      try { const msg = await channel.messages.fetch(topReviewsMessageId); await msg.edit({ embeds: [embed] }); persistState(); return; }
-      catch { topReviewsMessageId = null; }
+      try {
+        const msg = await channel.messages.fetch(topReviewsMessageId);
+        await msg.edit({ embeds: [embed] });
+        persistState();
+        return;
+      } catch {
+        topReviewsMessageId = null;
+      }
     }
+
+    // 2) Fallback: cerca nel canale un messaggio precedente del bot con lo stesso embed
+    //    così dopo un riavvio non viene mai inviato un duplicato
+    try {
+      const recent = await channel.messages.fetch({ limit: 50 });
+      const existing = recent.find(
+        m => m.author.id === client.user.id &&
+             m.embeds.length > 0 &&
+             m.embeds[0]?.title === '🏆 Top 10 Buyers'
+      );
+      if (existing) {
+        topReviewsMessageId = existing.id;
+        await existing.edit({ embeds: [embed] });
+        persistState();
+        return;
+      }
+    } catch (err) {
+      console.error('Top buyers scan error:', err.message);
+    }
+
+    // 3) Solo se non esiste ancora nessun messaggio, ne manda uno nuovo e lo pinna
     const msg = await channel.send({ embeds: [embed] });
     topReviewsMessageId = msg.id;
     persistState();
+    try { await msg.pin(); } catch { /* pin opzionale */ }
   } catch (err) { console.error('Top buyers error:', err.message); }
 }
 
