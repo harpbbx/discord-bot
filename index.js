@@ -556,12 +556,11 @@ function buildMenuStep(step, session, extra = {}) {
     case 'choose_login': {
       const embed = new EmbedBuilder()
         .setTitle('🔐 Login Method')
-        .setDescription(`✅ Games requested:\n> ${session?.requestedGames || 'N/A'}\n\nPlease choose how you want to provide your login information:`)
-        .setColor(0x5865F2);
+        .setDescription(`✅ Payment confirmed!\n\n**Games:** ${session?.requestedGames || 'N/A'}\n\nPlease choose how you want to provide your login information so we can process your order:`)
+        .setColor(0x57F287);
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('menu_choose_credentials').setLabel('🔐 Use Credentials').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('menu_choose_qr').setLabel('📱 Use QR Code').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('menu_goto_main_purchase').setLabel('⬅️ Back').setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId('menu_choose_qr').setLabel('📱 Use QR Code').setStyle(ButtonStyle.Secondary)
       );
       return { embeds: [embed], components: [row] };
     }
@@ -581,7 +580,7 @@ function buildMenuStep(step, session, extra = {}) {
     case 'awaiting_price': {
       const embed = new EmbedBuilder()
         .setTitle('⏳ Waiting for Price')
-        .setDescription('✅ Order received!\n\nThe owner is reviewing your request and will set the price shortly.\n\nPlease wait — you will then be asked to provide your login method.')
+        .setDescription('✅ Order received!\n\nThe owner is reviewing your request and will set the price shortly.\n\nPlease wait — you will be notified when the price is ready.')
         .setColor(0xFEE75C)
         .setFooter({ text: 'Do not close this ticket' });
       return { embeds: [embed], components: [] };
@@ -688,6 +687,15 @@ function buildMenuStep(step, session, extra = {}) {
         new ButtonBuilder().setCustomId('menu_skip_review').setLabel('❌ Skip & Close').setStyle(ButtonStyle.Secondary)
       );
       return { embeds: [embed], components: [row] };
+    }
+
+    case 'awaiting_login_after_payment': {
+      const embed = new EmbedBuilder()
+        .setTitle('⏳ Awaiting Login')
+        .setDescription('✅ Login information received!\n\nThe owner will now process your order and deliver it shortly.\n\nPlease stay in this ticket.')
+        .setColor(0x57F287)
+        .setFooter({ text: 'Do not close this ticket' });
+      return { embeds: [embed], components: [] };
     }
 
     default:
@@ -1061,7 +1069,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ── MODAL: credentials → aggiorna menu ad awaiting_price ──
+  // ── MODAL: credentials → awaiting_login_after_payment ──
   if (interaction.isModalSubmit() && interaction.customId === 'modal_credentials') {
     const usernameEmail = interaction.fields.getTextInputValue('username_email');
     const password = interaction.fields.getTextInputValue('password');
@@ -1072,17 +1080,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
     session.loginMethod = 'credentials';
     session.loginConfirmed = true;
     userSessions.set(interaction.user.id, session);
-    // Mostra credenziali solo all'owner nel canale
+
+    // Mostra credenziali all'owner nel canale
     const credsEmbed = new EmbedBuilder()
       .setTitle('🔐 Customer Credentials (temporary)')
       .setDescription(`**Username/Email:** ${usernameEmail}\n**Password:** ${password}\n\n*This information will be deleted when the ticket is closed.*`)
       .setColor(0xFEE75C);
     await interaction.channel.send({ embeds: [credsEmbed] });
-    // Aggiorna il menu a choose_payment con i prezzi già salvati in session
-    const cryptoAmountsFromSession = session.cryptoAmounts;
+
+    // Notifica owner per procedere con la consegna
+    const ownerRole2 = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
+    if (ownerRole2) {
+      const summaryEmbed = new EmbedBuilder()
+        .setTitle('📋 Order Ready — Deliver Now')
+        .addFields(
+          { name: '👤 Customer', value: `${interaction.user}`, inline: true },
+          { name: '🎫 Ticket', value: `#${session.number}`, inline: true },
+          { name: '🎮 Game(s)', value: session.requestedGames || 'N/A', inline: false },
+          { name: '💶 Amount Paid', value: `${session.priceEur} EUR`, inline: true },
+          { name: '🔐 Login', value: 'Credentials provided above', inline: true },
+        )
+        .setColor(0x57F287).setTimestamp();
+      const deliverRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`order_delivered_${interaction.user.id}`).setLabel('✅ Order Delivered').setStyle(ButtonStyle.Success)
+      );
+      await interaction.channel.send({ content: `${ownerRole2}`, embeds: [summaryEmbed], components: [deliverRow] });
+    }
+
     await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Credentials saved!', ephemeral: true }));
-    await editMenuMessage(interaction, interaction.user.id, 'choose_payment', { cryptoAmounts: cryptoAmountsFromSession });
-    startPaymentTimer(interaction.guild, interaction.user.id, session.channelId, session);
+    await editMenuMessage(interaction, interaction.user.id, 'awaiting_login_after_payment');
     return;
   }
 
@@ -1132,9 +1158,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     userSessions.set(interaction.user.id, session);
 
-    const cryptoAmountsFromSession = session.cryptoAmounts;
-    await updateMenu(interaction, 'choose_payment', { cryptoAmounts: cryptoAmountsFromSession });
-    startPaymentTimer(interaction.guild, interaction.user.id, session.channelId, session);
+    // Notifica owner per procedere con la consegna
+    const ownerRoleQr = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
+    if (ownerRoleQr) {
+      const summaryEmbed = new EmbedBuilder()
+        .setTitle('📋 Order Ready — Deliver Now')
+        .addFields(
+          { name: '👤 Customer', value: `${interaction.user}`, inline: true },
+          { name: '🎫 Ticket', value: `#${session.number}`, inline: true },
+          { name: '🎮 Game(s)', value: session.requestedGames || 'N/A', inline: false },
+          { name: '💶 Amount Paid', value: `${session.priceEur} EUR`, inline: true },
+          { name: '🔐 Login', value: '✅ QR Code confirmed', inline: true },
+        )
+        .setColor(0x57F287).setTimestamp();
+      const deliverRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`order_delivered_${interaction.user.id}`).setLabel('✅ Order Delivered').setStyle(ButtonStyle.Success)
+      );
+      await interaction.channel.send({ content: `${ownerRoleQr}`, embeds: [summaryEmbed], components: [deliverRow] });
+    }
+
+    await updateMenu(interaction, 'awaiting_login_after_payment');
     return;
   }
 
@@ -1190,21 +1233,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setFooter({ text: 'Rates are live.' });
     await interaction.reply({ embeds: [priceEmbed], ephemeral: true });
 
-    // Ora chiedi al cliente il metodo di login
+    // Ora mostra direttamente il menu di pagamento al cliente
     const userChannel = interaction.guild.channels.cache.get(session.channelId);
     if (userChannel && session.menuMessageId) {
       try {
         const menuMsg = await userChannel.messages.fetch(session.menuMessageId);
-        const menuData = buildMenuStep('choose_login', session);
-        await menuMsg.edit({ content: `<@${userId}> 💶 Price set: **${priceEur} EUR** — please choose your login method.`, ...menuData });
+        const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
+        await menuMsg.edit({ content: `<@${userId}>`, ...menuData });
       } catch {
         const customer = await interaction.guild.members.fetch(userId).catch(() => null);
-        const menuData = buildMenuStep('choose_login', session);
-        const msg = await userChannel.send({ content: `${customer} 💶 Price set: **${priceEur} EUR** — please choose your login method.`, ...menuData });
+        const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
+        const msg = await userChannel.send({ content: `${customer}`, ...menuData });
         session.menuMessageId = msg.id;
         userSessions.set(userId, session);
       }
     }
+    startPaymentTimer(interaction.guild, userId, session.channelId, session);
     return;
   }
 
@@ -1323,10 +1367,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     savePayment({ userId, method: 'PayPal', priceEur: session?.priceEur, games: session?.requestedGames, ticket: session?.number, confirmedBy: interaction.user.id });
 
-    // MODIFICA 2: DM al cliente
     if (member) await sendDMReceipt(member.user, session, 'PayPal', interaction.user.id);
 
-    // Ricevuta nel canale receipts
     const receiptChannel = interaction.guild.channels.cache.get(RECEIPT_CHANNEL_ID);
     if (receiptChannel && session) {
       await receiptChannel.send({ embeds: [new EmbedBuilder().setTitle('✅ PayPal Payment Confirmed').addFields(
@@ -1338,24 +1380,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ).setColor(0x57F287).setTimestamp()] });
     }
 
-    // MODIFICA 4: mostra riepilogo ordine con tasto "Order Delivered"
+    // Chiedi al cliente il metodo di login
     const ticketChannel = interaction.guild.channels.cache.get(session?.channelId);
-    if (ticketChannel) {
-      const summaryEmbed = new EmbedBuilder()
-        .setTitle('📋 Order Summary')
-        .addFields(
-          { name: '👤 Customer', value: `${member}`, inline: true },
-          { name: '🎫 Ticket', value: `#${session.number}`, inline: true },
-          { name: '🎮 Game(s) Ordered', value: session.requestedGames || 'N/A', inline: false },
-          { name: '💶 Amount Paid', value: `${session.priceEur} EUR`, inline: true },
-          { name: '💳 Method', value: 'PayPal', inline: true },
-        )
-        .setColor(0x57F287).setTimestamp();
-
-      const ownerDeliveredRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`order_delivered_${userId}`).setLabel('✅ Order Delivered').setStyle(ButtonStyle.Success)
-      );
-      await ticketChannel.send({ content: `${ownerRole}`, embeds: [summaryEmbed], components: [ownerDeliveredRow] });
+    if (ticketChannel && session?.menuMessageId) {
+      try {
+        const menuMsg = await ticketChannel.messages.fetch(session.menuMessageId);
+        const menuData = buildMenuStep('choose_login', session);
+        await menuMsg.edit({ content: `<@${userId}> ✅ Payment confirmed! Please provide your login to receive the game.`, ...menuData });
+      } catch {
+        const menuData = buildMenuStep('choose_login', session);
+        const msg = await ticketChannel.send({ content: `<@${userId}> ✅ Payment confirmed! Please provide your login to receive the game.`, ...menuData });
+        if (session) { session.menuMessageId = msg.id; userSessions.set(userId, session); }
+      }
     }
   }
 
@@ -1509,10 +1545,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     savePayment({ userId, method: session?.selectedCoin, priceEur: session?.priceEur, games: session?.requestedGames, ticket: session?.number, hash: session?.lastHash, confirmedBy: interaction.user.id });
 
-    // MODIFICA 2: DM al cliente
     if (member) await sendDMReceipt(member.user, session, `${session?.selectedCoin} (${session?.selectedNetwork})`, interaction.user.id);
 
-    // Ricevuta
     const receiptChannel = interaction.guild.channels.cache.get(RECEIPT_CHANNEL_ID);
     if (receiptChannel && session) {
       await receiptChannel.send({ embeds: [new EmbedBuilder().setTitle('✅ Crypto Payment Confirmed').addFields(
@@ -1527,24 +1561,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ).setColor(0x57F287).setTimestamp()] });
     }
 
-    // MODIFICA 4: riepilogo ordine con "Order Delivered"
+    // Chiedi al cliente il metodo di login
     const ticketChannel = interaction.guild.channels.cache.get(session?.channelId);
-    if (ticketChannel) {
-      const summaryEmbed = new EmbedBuilder()
-        .setTitle('📋 Order Summary')
-        .addFields(
-          { name: '👤 Customer', value: `${member}`, inline: true },
-          { name: '🎫 Ticket', value: `#${session.number}`, inline: true },
-          { name: '🎮 Game(s) Ordered', value: session.requestedGames || 'N/A', inline: false },
-          { name: '💶 Amount Paid', value: `${session.priceEur} EUR`, inline: true },
-          { name: '💳 Method', value: `${session.selectedCoin} (${session.selectedNetwork})`, inline: true },
-          { name: '🔗 Hash', value: `\`${session.lastHash}\``, inline: false },
-        )
-        .setColor(0x57F287).setTimestamp();
-      const ownerDeliveredRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`order_delivered_${userId}`).setLabel('✅ Order Delivered').setStyle(ButtonStyle.Success)
-      );
-      await ticketChannel.send({ content: `${ownerRole}`, embeds: [summaryEmbed], components: [ownerDeliveredRow] });
+    if (ticketChannel && session?.menuMessageId) {
+      try {
+        const menuMsg = await ticketChannel.messages.fetch(session.menuMessageId);
+        const menuData = buildMenuStep('choose_login', session);
+        await menuMsg.edit({ content: `<@${userId}> ✅ Payment confirmed! Please provide your login to receive the game.`, ...menuData });
+      } catch {
+        const menuData = buildMenuStep('choose_login', session);
+        const msg = await ticketChannel.send({ content: `<@${userId}> ✅ Payment confirmed! Please provide your login to receive the game.`, ...menuData });
+        if (session) { session.menuMessageId = msg.id; userSessions.set(userId, session); }
+      }
     }
   }
 
