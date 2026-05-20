@@ -1054,7 +1054,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
     if (ownerRole) {
       const priceButtonRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`set_price_${interaction.user.id}`).setLabel('💰 Set Price (EUR)').setStyle(ButtonStyle.Primary));
-      await interaction.channel.send({ content: `${ownerRole}`, components: [priceButtonRow] });
+      const setPriceMsg = await interaction.channel.send({ content: `${ownerRole}`, components: [priceButtonRow] });
+      session.setPriceMsgId = setPriceMsg.id;
+      userSessions.set(interaction.user.id, session);
     }
     // Aggiorna il menu ad awaiting_price (edita il messaggio esistente, nessun nuovo messaggio)
     await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Credentials saved!', ephemeral: true }));
@@ -1071,7 +1073,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await updateMenu(interaction, 'qr_waiting');
     const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
     if (ownerRole) {
-      await interaction.channel.send({ content: `${ownerRole}`, embeds: [new EmbedBuilder().setTitle('📱 QR Code Requested').setDescription(`${interaction.user} has chosen QR code login. Please send the QR code manually in this channel.`).setColor(0xFEE75C)] });
+      const qrRequestMsg = await interaction.channel.send({ content: `${ownerRole}`, embeds: [new EmbedBuilder().setTitle('📱 QR Code Requested').setDescription(`${interaction.user} has chosen QR code login. Please send the QR code manually in this channel.`).setColor(0xFEE75C)] });
+      session.qrRequestMsgId = qrRequestMsg.id;
+      userSessions.set(interaction.user.id, session);
     }
     return;
   }
@@ -1082,10 +1086,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!session) return interaction.reply({ content: '❌ Session expired.', ephemeral: true });
     session.loginConfirmed = true;
     userSessions.set(interaction.user.id, session);
+
+    // Elimina il messaggio "QR Code Requested" salvato in precedenza
+    if (session.qrRequestMsgId) {
+      try {
+        const qrReqMsg = await interaction.channel.messages.fetch(session.qrRequestMsgId);
+        await qrReqMsg.delete();
+      } catch { /* già eliminato o non trovato */ }
+      delete session.qrRequestMsgId;
+    }
+
+    // Elimina tutti i messaggi con immagini inviati nel canale dopo l'avvio del ticket (immagine QR dell'owner)
+    try {
+      const fetched = await interaction.channel.messages.fetch({ limit: 50 });
+      const imageMsgs = fetched.filter(m =>
+        m.attachments.size > 0 &&
+        m.attachments.some(a => a.contentType && a.contentType.startsWith('image/'))
+      );
+      for (const msg of imageMsgs.values()) {
+        await msg.delete().catch(() => {});
+      }
+    } catch { /* ignora errori fetch */ }
+
+    userSessions.set(interaction.user.id, session);
+
     const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
     if (ownerRole) {
       const priceButtonRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`set_price_${interaction.user.id}`).setLabel('💰 Set Price (EUR)').setStyle(ButtonStyle.Primary));
-      await interaction.channel.send({ content: `${ownerRole}`, components: [priceButtonRow] });
+      const setPriceMsg = await interaction.channel.send({ content: `${ownerRole}`, components: [priceButtonRow] });
+      session.setPriceMsgId = setPriceMsg.id;
+      userSessions.set(interaction.user.id, session);
     }
     await updateMenu(interaction, 'awaiting_price');
     return;
@@ -1117,6 +1147,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const cryptoAmounts = await convertEurToCrypto(priceEur);
     if (!cryptoAmounts) return interaction.reply({ content: '❌ Error fetching exchange rates. Try again.' });
+
+    // Elimina il messaggio "Set Price" dal canale
+    const userChannelForDelete = interaction.guild.channels.cache.get(session.channelId);
+    if (userChannelForDelete && session.setPriceMsgId) {
+      try {
+        const setPriceMsg = await userChannelForDelete.messages.fetch(session.setPriceMsgId);
+        await setPriceMsg.delete();
+      } catch { /* già eliminato o non trovato */ }
+      delete session.setPriceMsgId;
+      userSessions.set(userId, session);
+    }
 
     // Conferma prezzo all'owner nel canale
     const priceEmbed = new EmbedBuilder()
