@@ -70,7 +70,7 @@ const RATING_VOICE_CHANNEL_ID = '1505285184776568982';
 const TOP_REVIEWS_CHANNEL_ID = '1505284352907415622';
 const BLACKLIST_CHANNEL_ID = '1505289205478330450';
 const RECEIPT_CHANNEL_ID = '1505328728262049852';
-const DEFAULT_TICKET_LIMIT = 2; // max ticket per 24h di default
+const DEFAULT_TICKET_LIMIT = 10; // max ticket per 24h di default
 
 // ─────────────────────────────────────────
 // CRYPTO DATA
@@ -1358,12 +1358,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     clearPaymentTimer(userId);
     if (member) await assignVerifiedBuyerRole(interaction.guild, member);
 
-    const confirmEmbed = new EmbedBuilder()
-      .setTitle('✅ PayPal Payment Confirmed!')
-      .setDescription(`${member}'s payment of **${session?.priceEur} EUR** confirmed.\n\n🎮 Games: ${session?.requestedGames}\n📝 Ticket: #${session?.number}`)
-      .setColor(0x57F287);
-    const disabledRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('disabled').setLabel('✅ Payment Confirmed').setStyle(ButtonStyle.Success).setDisabled(true));
-    await interaction.update({ embeds: [confirmEmbed], components: [disabledRow] });
+    // Cancella il messaggio di verifica dalla chat
+    await interaction.deferUpdate();
+    await interaction.message.delete().catch(() => {});
 
     savePayment({ userId, method: 'PayPal', priceEur: session?.priceEur, games: session?.requestedGames, ticket: session?.number, confirmedBy: interaction.user.id });
 
@@ -1702,7 +1699,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // Congela il menu prima di procedere
     await interaction.deferUpdate().catch(() => interaction.reply({ content: '⏳ Publishing review...', ephemeral: true }));
-    await editMenuMessage(interaction, interaction.user.id, 'awaiting_payment_verification');
 
     const starsLabel = ['', '⭐', '⭐⭐', '⭐⭐⭐', '⭐⭐⭐⭐', '⭐⭐⭐⭐⭐'];
     const colors = [null, 0xED4245, 0xE67E22, 0xFEE75C, 0x57F287, 0x00FF7F];
@@ -1741,6 +1737,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await sendTranscript(interaction.guild, ticketChannel, interaction.user, { game, text: reviewText, stars }, session?.openTime, session?.reason, session?.number);
       openTickets = Math.max(0, openTickets - 1);
       closedToday++;
+      // Edita il messaggio della review prompt con avviso chiusura, invece di inviarne uno nuovo
+      if (session?.menuMessageId) {
+        try {
+          const menuMsg = await ticketChannel.messages.fetch(session.menuMessageId);
+          await menuMsg.edit({
+            content: `✅ Thank you for your review! 🎉\n🔒 *This ticket will be closed automatically in 5 seconds...*`,
+            embeds: [],
+            components: []
+          });
+        } catch { }
+      }
       setTimeout(async () => { try { await ticketChannel.delete(); } catch (err) { console.error(err.message); } }, 5000);
     }
     userSessions.delete(interaction.user.id);
