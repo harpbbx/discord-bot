@@ -1060,7 +1060,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // ── MODAL: purchase form → invia Set Price all'owner, aggiorna menu a choose_login ──
   if (interaction.isModalSubmit() && interaction.customId === 'modal_purchase_form') {
-    const requestedGames = interaction.fields.getTextInputValue('requested_games');
+    const requestedGames = interaction.fields.getTextInputValue('requested_games').toUpperCase();
     const session = userSessions.get(interaction.user.id) || {};
     session.requestedGames = requestedGames;
     userSessions.set(interaction.user.id, session);
@@ -1070,7 +1070,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (ownerRoleFound) {
       const gamesEmbed = new EmbedBuilder()
         .setTitle('🎮 New Order — Set Price')
-        .setDescription(`${interaction.user} has filled the purchase form.\n\n**Games requested:**\n${requestedGames}`)
+        .setDescription(`${interaction.user} has filled the purchase form.\n\n**Games requested:**\n## ${requestedGames}`)
         .setColor(0xFEE75C)
         .setTimestamp();
       const priceButtonRow = new ActionRowBuilder().addComponents(
@@ -1126,7 +1126,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .addFields(
           { name: '👤 Customer', value: `${interaction.user}`, inline: true },
           { name: '🎫 Ticket', value: `#${session.number}`, inline: true },
-          { name: '🎮 Game(s)', value: session.requestedGames || 'N/A', inline: false },
+          { name: '🎮 Game(s)', value: `**${session.requestedGames || 'N/A'}**`, inline: false },
           { name: '💶 Amount Paid', value: `${session.priceEur} EUR`, inline: true },
           { name: '🔐 Login', value: 'Credentials provided above', inline: true },
         )
@@ -1196,7 +1196,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .addFields(
           { name: '👤 Customer', value: `${interaction.user}`, inline: true },
           { name: '🎫 Ticket', value: `#${session.number}`, inline: true },
-          { name: '🎮 Game(s)', value: session.requestedGames || 'N/A', inline: false },
+          { name: '🎮 Game(s)', value: `**${session.requestedGames || 'N/A'}**`, inline: false },
           { name: '💶 Amount Paid', value: `${session.priceEur} EUR`, inline: true },
           { name: '🔐 Login', value: '✅ QR Code confirmed', inline: true },
         )
