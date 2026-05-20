@@ -1145,7 +1145,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const userId = interaction.customId.split('_')[2];
     const session = userSessions.get(userId);
     if (!session) return interaction.reply({ content: '❌ Session not found.', ephemeral: true });
-    if (!session.loginConfirmed) return interaction.reply({ content: '❌ Customer has not provided login information yet.', ephemeral: true });
     const modal = new ModalBuilder().setCustomId(`modal_set_price_${userId}`).setTitle('💰 Set Price in EUR');
     modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('price_eur').setLabel('Price in EUR').setStyle(TextInputStyle.Short).setPlaceholder('e.g., 29.99').setRequired(true)));
     await interaction.showModal(modal);
