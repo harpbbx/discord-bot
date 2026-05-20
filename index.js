@@ -588,9 +588,15 @@ function buildMenuStep(step, session, extra = {}) {
     }
 
     case 'choose_payment': {
+      const crypto = extra?.cryptoAmounts;
+      let desc = `💶 **Total: ${session?.priceEur} EUR**\n\n`;
+      if (crypto) {
+        desc += `**Crypto equivalents:**\n💵 USDC: **${crypto.USDC}**\n₿ BTC: **${crypto.BTC}**\n⟠ ETH: **${crypto.ETH}**\n◎ SOL: **${crypto.SOL}**\n\n`;
+      }
+      desc += `Please select how you would like to pay:\n💳 **PayPal** — Instant\n🪙 **Crypto** — Multiple coins available\n\n⏰ You have **30 minutes** to complete the payment.`;
       const embed = new EmbedBuilder()
         .setTitle('💳 Choose Payment Method')
-        .setDescription(`💶 **Total: ${session?.priceEur} EUR**\n\nPlease select how you would like to pay:\n💳 **PayPal** — Instant\n🪙 **Crypto** — Multiple coins available\n\n⏰ You have **30 minutes** to complete the payment.`)
+        .setDescription(desc)
         .setColor(0x5865F2);
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('menu_payment_paypal').setLabel('💳 PayPal').setStyle(ButtonStyle.Primary),
@@ -1010,12 +1016,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ── MODAL: purchase form → aggiorna menu a choose_login ──
+  // ── MODAL: purchase form → invia Set Price all'owner, aggiorna menu a choose_login ──
   if (interaction.isModalSubmit() && interaction.customId === 'modal_purchase_form') {
     const requestedGames = interaction.fields.getTextInputValue('requested_games');
     const session = userSessions.get(interaction.user.id) || {};
     session.requestedGames = requestedGames;
     userSessions.set(interaction.user.id, session);
+
+    // Notifica owner con bottone Set Price subito dopo che il cliente ha inserito i giochi
+    const ownerRoleFound = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
+    if (ownerRoleFound) {
+      const gamesEmbed = new EmbedBuilder()
+        .setTitle('🎮 New Order — Set Price')
+        .setDescription(`${interaction.user} has filled the purchase form.\n\n**Games requested:**\n${requestedGames}`)
+        .setColor(0xFEE75C)
+        .setTimestamp();
+      const priceButtonRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`set_price_${interaction.user.id}`).setLabel('💰 Set Price (EUR)').setStyle(ButtonStyle.Primary)
+      );
+      const setPriceMsg = await interaction.channel.send({ content: `${ownerRoleFound}`, embeds: [gamesEmbed], components: [priceButtonRow] });
+      session.setPriceMsgId = setPriceMsg.id;
+      userSessions.set(interaction.user.id, session);
+    }
+
     await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Form submitted!', ephemeral: true }));
     await editMenuMessage(interaction, interaction.user.id, 'choose_login');
     return;
@@ -1051,13 +1074,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setDescription(`**Username/Email:** ${usernameEmail}\n**Password:** ${password}\n\n*This information will be deleted when the ticket is closed.*`)
       .setColor(0xFEE75C);
     await interaction.channel.send({ embeds: [credsEmbed] });
-    const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
-    if (ownerRole) {
-      const priceButtonRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`set_price_${interaction.user.id}`).setLabel('💰 Set Price (EUR)').setStyle(ButtonStyle.Primary));
-      const setPriceMsg = await interaction.channel.send({ content: `${ownerRole}`, components: [priceButtonRow] });
-      session.setPriceMsgId = setPriceMsg.id;
-      userSessions.set(interaction.user.id, session);
-    }
     // Aggiorna il menu ad awaiting_price (edita il messaggio esistente, nessun nuovo messaggio)
     await interaction.deferUpdate().catch(() => interaction.reply({ content: '✅ Credentials saved!', ephemeral: true }));
     await editMenuMessage(interaction, interaction.user.id, 'awaiting_price');
@@ -1111,12 +1127,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     userSessions.set(interaction.user.id, session);
 
     const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
-    if (ownerRole) {
-      const priceButtonRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`set_price_${interaction.user.id}`).setLabel('💰 Set Price (EUR)').setStyle(ButtonStyle.Primary));
-      const setPriceMsg = await interaction.channel.send({ content: `${ownerRole}`, components: [priceButtonRow] });
-      session.setPriceMsgId = setPriceMsg.id;
-      userSessions.set(interaction.user.id, session);
-    }
     await updateMenu(interaction, 'awaiting_price');
     return;
   }
@@ -1175,13 +1185,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (userChannel && session.menuMessageId) {
       try {
         const menuMsg = await userChannel.messages.fetch(session.menuMessageId);
-        const menuData = buildMenuStep('choose_payment', session);
-        await menuMsg.edit({ content: `<@${userId}> 💶 Price confirmed: **${priceEur} EUR** (≈ $${cryptoAmounts.usdAmount} USD)\n💵 USDC: ${cryptoAmounts.USDC} · ₿ BTC: ${cryptoAmounts.BTC} · ⟠ ETH: ${cryptoAmounts.ETH} · ◎ SOL: ${cryptoAmounts.SOL}\n⏰ You have **30 minutes** to complete the payment.`, ...menuData });
+        const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
+        await menuMsg.edit({ content: `<@${userId}>`, ...menuData });
       } catch {
         // Fallback: send new message if menu message lost
         const customer = await interaction.guild.members.fetch(userId).catch(() => null);
-        const menuData = buildMenuStep('choose_payment', session);
-        const msg = await userChannel.send({ content: `${customer} 💶 Price confirmed: **${priceEur} EUR**`, ...menuData });
+        const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
+        const msg = await userChannel.send({ content: `${customer}`, ...menuData });
         session.menuMessageId = msg.id;
         userSessions.set(userId, session);
       }
