@@ -961,7 +961,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ).join('\n');
           const buf = Buffer.from(JSON.stringify(reviews, null, 2), 'utf-8');
           await interaction.user.send({
-            content: `📝 **Recensioni (${reviews.length} totali)**\n\\`\\`\\`\n${summary.slice(0, 1800)}\n\\`\\`\\``,
+            content: '📝 **Recensioni (' + reviews.length + ' totali)**\n```\n' + summary.slice(0, 1800) + '\n```',
             files: [{ attachment: buf, name: 'reviews.json' }]
           });
 
@@ -974,7 +974,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ).join('\n');
           const buf = Buffer.from(JSON.stringify(payments, null, 2), 'utf-8');
           await interaction.user.send({
-            content: `💳 **Pagamenti (${payments.length} totali — €${total.toFixed(2)} incassati)**\n\\`\\`\\`\n${summary.slice(0, 1800)}\n\\`\\`\\``,
+            content: '💳 **Pagamenti (' + payments.length + ' totali — €' + total.toFixed(2) + ' incassati)**\n```\n' + summary.slice(0, 1800) + '\n```',
             files: [{ attachment: buf, name: 'payments.json' }]
           });
 
