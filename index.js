@@ -540,7 +540,7 @@ function buildMenuStep(step, session, extra = {}) {
     case 'main_purchase': {
       const embed = new EmbedBuilder()
         .setTitle('🎮 Purchase Menu')
-        .setDescription('✅ Rules accepted! Use the buttons below to proceed with your purchase.\n\n**Steps:**\n1️⃣ Fill in the purchase form\n2️⃣ Provide login method\n3️⃣ Owner sets the price\n4️⃣ Choose payment method')
+        .setDescription('✅ Rules accepted! Use the buttons below to proceed with your purchase.\n\n**Steps:**\n1️⃣ Fill in the purchase form\n2️⃣ Owner sets the price\n3️⃣ Choose payment method\n4️⃣ Provide login method')
         .setColor(0x5865F2)
         .setFooter({ text: 'Use the buttons below to navigate' });
       const row = new ActionRowBuilder().addComponents(
