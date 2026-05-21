@@ -20,7 +20,7 @@ require('dotenv').config();
 // ─────────────────────────────────────────
 // DATABASE PERSISTENTE (JSON)
 // ─────────────────────────────────────────
-const DB_PATH = path.join(__dirname, 'database.json');
+const DB_PATH = process.env.DATA_DIR ? `${process.env.DATA_DIR}/database.json` : path.join(__dirname, 'database.json');
 
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
@@ -423,7 +423,6 @@ async function updateTopBuyers(guild) {
     }
 
     // 2) Fallback: cerca nel canale un messaggio precedente del bot con lo stesso embed
-    //    così dopo un riavvio non viene mai inviato un duplicato
     try {
       const recent = await channel.messages.fetch({ limit: 50 });
       const existing = recent.find(
@@ -824,6 +823,24 @@ client.once(Events.ClientReady, async () => {
       options: [
         { name: 'canale', type: 7, description: 'Canale da svuotare (default: canale corrente)', required: false }
       ]
+    },
+    {
+      name: 'exportdb',
+      description: 'Ricevi il database completo via DM (Owner only)',
+      options: [
+        {
+          name: 'tipo',
+          type: 3,
+          description: 'Cosa vuoi esportare',
+          required: false,
+          choices: [
+            { name: 'Tutto (database.json)', value: 'all' },
+            { name: 'Solo recensioni', value: 'reviews' },
+            { name: 'Solo pagamenti', value: 'payments' },
+            { name: 'Solo statistiche', value: 'stats' }
+          ]
+        }
+      ]
     }
   ];
   for (const guild of client.guilds.cache.values()) {
@@ -894,7 +911,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: '❌ Solo l\'Owner può usare questo comando.', ephemeral: true });
 
       const target = interaction.options.getChannel('canale') || interaction.channel;
-      if (!target || target.type !== 0 /* GuildText */)
+      if (!target || target.type !== 0)
         return interaction.reply({ content: '❌ Canale non valido.', ephemeral: true });
 
       await interaction.deferReply({ ephemeral: true });
@@ -904,16 +921,96 @@ client.on(Events.InteractionCreate, async (interaction) => {
       do {
         batch = await target.messages.fetch({ limit: 100 });
         if (batch.size === 0) break;
-        // Discord permette bulkDelete solo per messaggi < 14 giorni
         const recent = batch.filter(m => Date.now() - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
-        const old14   = batch.filter(m => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
+        const old14  = batch.filter(m => Date.now() - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
         if (recent.size > 0) await target.bulkDelete(recent, true);
         for (const m of old14.values()) await m.delete().catch(() => {});
         deleted += batch.size;
-        await new Promise(r => setTimeout(r, 500)); // anti-ratelimit
+        await new Promise(r => setTimeout(r, 500));
       } while (batch.size >= 2);
 
       await interaction.editReply({ content: `🗑️ Cancellati **${deleted}** messaggi da <#${target.id}>.` });
+    }
+
+    // ── exportdb ──
+    else if (interaction.commandName === 'exportdb') {
+      const ownerRole = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
+      if (!interaction.member.roles.cache.has(ownerRole?.id))
+        return interaction.reply({ content: '❌ Solo l\'Owner può usare questo comando.', ephemeral: true });
+
+      await interaction.deferReply({ ephemeral: true });
+
+      const tipo = interaction.options.getString('tipo') || 'all';
+      const db = loadDB();
+
+      try {
+        if (tipo === 'all') {
+          // Manda il database.json completo
+          const buf = Buffer.from(JSON.stringify(db, null, 2), 'utf-8');
+          await interaction.user.send({
+            content: '📦 **Database completo** — `database.json`',
+            files: [{ attachment: buf, name: 'database.json' }]
+          });
+
+        } else if (tipo === 'reviews') {
+          const reviews = db.reviews || [];
+          if (reviews.length === 0) return interaction.editReply({ content: '📭 Nessuna recensione trovata.' });
+          // Manda come JSON + riepilogo testuale
+          const summary = reviews.map((r, i) =>
+            `#${i+1} | ⭐${r.stars} | ${r.game} | ${r.userId} | ${new Date(r.date).toLocaleDateString('it-IT')}`
+          ).join('\n');
+          const buf = Buffer.from(JSON.stringify(reviews, null, 2), 'utf-8');
+          await interaction.user.send({
+            content: `📝 **Recensioni (${reviews.length} totali)**\n\\`\\`\\`\n${summary.slice(0, 1800)}\n\\`\\`\\``,
+            files: [{ attachment: buf, name: 'reviews.json' }]
+          });
+
+        } else if (tipo === 'payments') {
+          const payments = db.payments || [];
+          if (payments.length === 0) return interaction.editReply({ content: '📭 Nessun pagamento trovato.' });
+          const total = payments.reduce((s, p) => s + (p.priceEur || 0), 0);
+          const summary = payments.map((p, i) =>
+            `#${i+1} | €${p.priceEur} | ${p.method} | ${p.games} | ${new Date(p.date).toLocaleDateString('it-IT')}`
+          ).join('\n');
+          const buf = Buffer.from(JSON.stringify(payments, null, 2), 'utf-8');
+          await interaction.user.send({
+            content: `💳 **Pagamenti (${payments.length} totali — €${total.toFixed(2)} incassati)**\n\\`\\`\\`\n${summary.slice(0, 1800)}\n\\`\\`\\``,
+            files: [{ attachment: buf, name: 'payments.json' }]
+          });
+
+        } else if (tipo === 'stats') {
+          const avg = allRatings.length > 0
+            ? (allRatings.reduce((a,b) => a+b, 0) / allRatings.length).toFixed(2)
+            : '—';
+          const payments = db.payments || [];
+          const totalEur = payments.reduce((s, p) => s + (p.priceEur || 0), 0);
+          const topBuyers = [...purchasesPerUser.entries()]
+            .sort((a,b) => b[1].count - a[1].count)
+            .slice(0, 5)
+            .map(([,d], i) => `${i+1}. <@${d.userId}> — ${d.count} acquisti`)
+            .join('\n') || 'Nessuno';
+          const embed = new EmbedBuilder()
+            .setTitle('📊 Statistiche Bot')
+            .addFields(
+              { name: '🎫 Ticket totali', value: `${ticketCounter}`, inline: true },
+              { name: '📝 Recensioni', value: `${allRatings.length}`, inline: true },
+              { name: '⭐ Rating medio', value: `${avg}/5`, inline: true },
+              { name: '💳 Pagamenti', value: `${payments.length}`, inline: true },
+              { name: '💶 Incassato totale', value: `€${totalEur.toFixed(2)}`, inline: true },
+              { name: '🚫 Blacklist', value: `${blacklist.size} utenti`, inline: true },
+              { name: '🏆 Top 5 acquirenti', value: topBuyers, inline: false }
+            )
+            .setColor(0x5865F2)
+            .setTimestamp()
+            .setFooter({ text: 'Esportato da ' + interaction.user.username });
+          await interaction.user.send({ embeds: [embed] });
+        }
+
+        await interaction.editReply({ content: `✅ Dati inviati in DM!` });
+      } catch (err) {
+        console.error('exportdb error:', err.message);
+        await interaction.editReply({ content: '❌ Errore — assicurati di avere i DM aperti.' });
+      }
     }
 
     // MODIFICA 8: comando setlimit
