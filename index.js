@@ -307,9 +307,9 @@ async function convertEurToCrypto(eurAmount) {
 }
 
 // ─────────────────────────────────────────
-// STEAM PRICE LOOKUP (India store → EUR +14%)
+// STEAM PRICE LOOKUP (India store → EUR +17%)
 // ─────────────────────────────────────────
-const STEAM_MARKUP = 1.14; // +14%
+const STEAM_MARKUP = 1.17; // +17%
 
 async function searchSteamGames(query) {
   try {
@@ -355,9 +355,34 @@ async function getSteamPriceEur(appid) {
   }
 }
 
-// ─────────────────────────────────────────
-// ROLE ASSIGNMENT
-// ─────────────────────────────────────────
+// Cerca tutte le edition di un gioco su Steam (es. Standard, Deluxe, GOTY, Ultimate...)
+async function searchSteamEditions(baseName, baseAppid) {
+  try {
+    const res = await axios.get('https://store.steampowered.com/api/storesearch/', {
+      params: { term: baseName, l: 'english', cc: 'IN' },
+      timeout: 8000
+    });
+    const items = res.data?.items || [];
+    // Filtra solo i risultati che hanno lo stesso nome base (case insensitive, partial match)
+    const baseNameLower = baseName.toLowerCase();
+    const related = items.filter(g => g.name.toLowerCase().includes(baseNameLower) || baseNameLower.includes(g.name.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim()));
+    // Includi sempre il gioco base, rimuovi duplicati
+    const seen = new Set();
+    const editions = [];
+    for (const g of related) {
+      if (!seen.has(g.id)) {
+        seen.add(g.id);
+        editions.push({ appid: g.id, name: g.name });
+      }
+    }
+    // Se c'è solo l'appid base, nessuna edition trovata
+    if (editions.length <= 1) return null;
+    return editions.slice(0, 5);
+  } catch (err) {
+    console.error('Steam edition search error:', err.message);
+    return null;
+  }
+}
 async function assignVerifiedBuyerRole(guild, member) {
   try {
     const botMember = guild.members.cache.get(client.user.id);
@@ -655,6 +680,30 @@ function buildMenuStep(step, session, extra = {}) {
       return { embeds: [embed], components: [row] };
     }
 
+    case 'select_edition': {
+      const editions = extra?.editions || [];
+      let desc = `**${session?.selectedGameName}** has multiple editions available.\n\nPlease select which one you want:\n\n`;
+      editions.forEach((e, i) => {
+        const priceStr = e.priceEur != null ? `💶 **${e.priceEur} EUR**` : '🆓 Free / N/A';
+        desc += `**${i + 1}.** ${e.name} — ${priceStr}\n`;
+      });
+      const embed = new EmbedBuilder()
+        .setTitle('📦 Select Edition')
+        .setDescription(desc)
+        .setColor(0x1b2838);
+      const buttons = editions.map((e, i) =>
+        new ButtonBuilder()
+          .setCustomId(`steam_edition_${i}`)
+          .setLabel(`${i + 1}. ${e.name.slice(0, 60)}`)
+          .setStyle(ButtonStyle.Secondary)
+      );
+      const rows = [];
+      for (let i = 0; i < buttons.length; i += 5) {
+        rows.push(new ActionRowBuilder().addComponents(buttons.slice(i, i + 5)));
+      }
+      return { embeds: [embed], components: rows };
+    }
+
     case 'searching_steam': {
       const embed = new EmbedBuilder()
         .setTitle('🔍 Searching Steam...')
@@ -673,8 +722,7 @@ function buildMenuStep(step, session, extra = {}) {
       const embed = new EmbedBuilder()
         .setTitle('🎮 Select Your Game')
         .setDescription(desc)
-        .setColor(0x1b2838)
-        .setFooter({ text: 'Price = Steam India + 14% service fee' });
+        .setColor(0x1b2838);
       const buttons = results.map((g, i) =>
         new ButtonBuilder()
           .setCustomId(`steam_select_${i}`)
@@ -938,6 +986,71 @@ client.once(Events.ClientReady, async () => {
 // ─────────────────────────────────────────
 // INTERACTIONS
 // ─────────────────────────────────────────
+// Helper: applica il gioco Steam scelto (con o senza edition) e aggiorna il menu
+async function applyChosenSteamGame(interaction, session, chosen) {
+  const userId = interaction.user.id;
+  session.requestedGames = chosen.name;
+  session.steamAppId = chosen.appid;
+
+  if (chosen.priceEur != null) {
+    session.priceEur = chosen.priceEur;
+    const cryptoAmounts = await convertEurToCrypto(chosen.priceEur);
+    session.cryptoAmounts = cryptoAmounts;
+    userSessions.set(userId, session);
+
+    const ownerRoleFound = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
+    if (ownerRoleFound) {
+      const gamesEmbed = new EmbedBuilder()
+        .setTitle('🎮 New Order — Price Auto-Set')
+        .setDescription(`${interaction.user} has selected:\n\n## ${chosen.name}\n\n💶 **Price: ${chosen.priceEur} EUR**\n\nNo action needed — price was set automatically.`)
+        .setColor(0x57F287)
+        .setTimestamp();
+      await interaction.channel.send({ content: `${ownerRoleFound}`, embeds: [gamesEmbed] });
+    }
+
+    // Vai direttamente a choose_payment
+    const ch = interaction.guild.channels.cache.get(session.channelId);
+    if (ch && session.menuMessageId) {
+      try {
+        const menuMsg = await ch.messages.fetch(session.menuMessageId);
+        const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
+        await menuMsg.edit({ content: `<@${userId}>`, ...menuData });
+      } catch {
+        const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
+        const msg = await ch.send({ content: `<@${userId}>`, ...menuData });
+        session.menuMessageId = msg.id;
+        userSessions.set(userId, session);
+      }
+    }
+    startPaymentTimer(interaction.guild, userId, session.channelId, session);
+  } else {
+    // Prezzo non disponibile: fallback manuale
+    userSessions.set(userId, session);
+    const ownerRoleFound = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
+    if (ownerRoleFound) {
+      const gamesEmbed = new EmbedBuilder()
+        .setTitle('🎮 New Order — Set Price Manually')
+        .setDescription(`${interaction.user} selected **${chosen.name}**, but no price was found (possibly Free to Play or region unavailable).\n\nPlease set the price manually.`)
+        .setColor(0xFEE75C)
+        .setTimestamp();
+      const priceButtonRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`set_price_${userId}`).setLabel('💰 Set Price (EUR)').setStyle(ButtonStyle.Primary)
+      );
+      const setPriceMsg = await interaction.channel.send({ content: `${ownerRoleFound}`, embeds: [gamesEmbed], components: [priceButtonRow] });
+      session.setPriceMsgId = setPriceMsg.id;
+      userSessions.set(userId, session);
+    }
+    const ch = interaction.guild.channels.cache.get(session.channelId);
+    if (ch && session.menuMessageId) {
+      try {
+        const menuMsg = await ch.messages.fetch(session.menuMessageId);
+        const menuData = buildMenuStep('awaiting_price', session);
+        await menuMsg.edit({ content: `<@${userId}>`, ...menuData });
+      } catch { }
+    }
+  }
+}
+
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
 
@@ -1337,64 +1450,44 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const chosen = session.steamResults[index];
     if (!chosen) return interaction.reply({ content: '❌ Invalid selection.', ephemeral: true });
 
-    session.requestedGames = chosen.name;
-    session.steamAppId = chosen.appid;
+    // Salva il nome del gioco base per riferimento futuro
+    session.selectedGameName = chosen.name;
+    userSessions.set(interaction.user.id, session);
 
-    if (chosen.priceEur != null) {
-      // Prezzo trovato: impostalo automaticamente
-      session.priceEur = chosen.priceEur;
-      const cryptoAmounts = await convertEurToCrypto(chosen.priceEur);
-      session.cryptoAmounts = cryptoAmounts;
+    // Cerca se esistono edition multiple
+    await interaction.deferUpdate().catch(() => {});
+    const editions = await searchSteamEditions(chosen.name, chosen.appid);
+
+    if (editions && editions.length > 1) {
+      // Recupera i prezzi delle edition in parallelo
+      const editionsWithPrices = await Promise.all(
+        editions.map(async e => {
+          const priceEur = await getSteamPriceEur(e.appid);
+          return { ...e, priceEur };
+        })
+      );
+      session.steamEditions = editionsWithPrices;
       userSessions.set(interaction.user.id, session);
-
-      // Notifica owner con il prezzo già impostato automaticamente
-      const ownerRoleFound = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
-      if (ownerRoleFound) {
-        const gamesEmbed = new EmbedBuilder()
-          .setTitle('🎮 New Order — Price Auto-Set (Steam India)')
-          .setDescription(`${interaction.user} has selected:\n\n## ${chosen.name}\n\n💶 **Price: ${chosen.priceEur} EUR** *(Steam India +14%)*\n\nNo action needed — price was set automatically.`)
-          .setColor(0x57F287)
-          .setTimestamp();
-        await interaction.channel.send({ content: `${ownerRoleFound}`, embeds: [gamesEmbed] });
-      }
-
-      await updateMenu(interaction, 'awaiting_price');
-
-      // Subito dopo aggiorna a choose_payment (il prezzo è già pronto)
-      const ch = interaction.guild.channels.cache.get(session.channelId);
-      if (ch && session.menuMessageId) {
-        try {
-          const menuMsg = await ch.messages.fetch(session.menuMessageId);
-          const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
-          await menuMsg.edit({ content: `<@${interaction.user.id}>`, ...menuData });
-        } catch {
-          const menuData = buildMenuStep('choose_payment', session, { cryptoAmounts });
-          const msg = await ch.send({ content: `<@${interaction.user.id}>`, ...menuData });
-          session.menuMessageId = msg.id;
-          userSessions.set(interaction.user.id, session);
-        }
-      }
-      startPaymentTimer(interaction.guild, interaction.user.id, session.channelId, session);
-    } else {
-      // Free to play o prezzo non disponibile: chiedi all'owner di impostarlo manualmente
-      session.requestedGames = chosen.name;
-      userSessions.set(interaction.user.id, session);
-      const ownerRoleFound = interaction.guild.roles.cache.find(r => r.name === OWNER_ROLE_NAME);
-      if (ownerRoleFound) {
-        const gamesEmbed = new EmbedBuilder()
-          .setTitle('🎮 New Order — Set Price Manually')
-          .setDescription(`${interaction.user} selected **${chosen.name}**, but no Steam price was found (possibly Free to Play or region unavailable).\n\nPlease set the price manually.`)
-          .setColor(0xFEE75C)
-          .setTimestamp();
-        const priceButtonRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`set_price_${interaction.user.id}`).setLabel('💰 Set Price (EUR)').setStyle(ButtonStyle.Primary)
-        );
-        const setPriceMsg = await interaction.channel.send({ content: `${ownerRoleFound}`, embeds: [gamesEmbed], components: [priceButtonRow] });
-        session.setPriceMsgId = setPriceMsg.id;
-        userSessions.set(interaction.user.id, session);
-      }
-      await updateMenu(interaction, 'awaiting_price');
+      await editMenuMessage(interaction, interaction.user.id, 'select_edition', { editions: editionsWithPrices });
+      return;
     }
+
+    // Nessuna edition trovata: procedi direttamente con il gioco scelto
+    await applyChosenSteamGame(interaction, session, chosen);
+    return;
+  }
+
+  // ── BUTTON: steam_edition_N — il cliente ha scelto l'edition ──
+  if (interaction.isButton() && interaction.customId.startsWith('steam_edition_')) {
+    const index = parseInt(interaction.customId.split('_')[2]);
+    const session = userSessions.get(interaction.user.id);
+    if (!session?.steamEditions) return interaction.reply({ content: '❌ Session expired.', ephemeral: true });
+
+    const chosen = session.steamEditions[index];
+    if (!chosen) return interaction.reply({ content: '❌ Invalid selection.', ephemeral: true });
+
+    await interaction.deferUpdate().catch(() => {});
+    await applyChosenSteamGame(interaction, session, chosen);
     return;
   }
 
