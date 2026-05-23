@@ -307,9 +307,8 @@ async function convertEurToCrypto(eurAmount) {
 }
 
 // ─────────────────────────────────────────
-// STEAM PRICE LOOKUP (India store → EUR +17%)
+// STEAM PRICE LOOKUP (India store → EUR + €6)
 // ─────────────────────────────────────────
-const STEAM_MARKUP = 1.17; // +17%
 
 async function searchSteamGames(query) {
   try {
@@ -327,7 +326,6 @@ async function searchSteamGames(query) {
 
 async function getSteamPriceEur(appid) {
   try {
-    // Prendi il prezzo in INR dallo store indiano
     const res = await axios.get('https://store.steampowered.com/api/appdetails', {
       params: { appids: appid, cc: 'in', filters: 'price_overview' },
       timeout: 8000
@@ -347,7 +345,7 @@ async function getSteamPriceEur(appid) {
       inrToEur = fxRes.data?.rates?.EUR || inrToEur;
     } catch { /* usa fallback */ }
 
-    const eurRaw = inrPrice * inrToEur * STEAM_MARKUP;
+    const eurRaw = inrPrice * inrToEur + 6; // converti in EUR e aggiungi €6 fissi
     return parseFloat(eurRaw.toFixed(2));
   } catch (err) {
     console.error('Steam price error:', err.message);
@@ -355,29 +353,58 @@ async function getSteamPriceEur(appid) {
   }
 }
 
-// Cerca tutte le edition di un gioco su Steam (es. Standard, Deluxe, GOTY, Ultimate...)
+// Cerca tutte le edition di un gioco su Steam usando la Steam Store search
+// Strategia: cerca il nome base, poi filtra per appid collegati tramite la pagina del gioco
 async function searchSteamEditions(baseName, baseAppid) {
   try {
-    const res = await axios.get('https://store.steampowered.com/api/storesearch/', {
+    // Usa l'API appdetails per ottenere i DLC/bundle associati al gioco base
+    const res = await axios.get('https://store.steampowered.com/api/appdetails', {
+      params: { appids: baseAppid, cc: 'in', filters: 'packages,dlc,price_overview,basic' },
+      timeout: 8000
+    });
+    const data = res.data?.[baseAppid];
+    if (!data?.success) return null;
+
+    const appData = data.data;
+    const packages = appData?.packages || [];
+
+    // Cerca nella storesearch le edition (nome base + parole chiave)
+    const searchRes = await axios.get('https://store.steampowered.com/api/storesearch/', {
       params: { term: baseName, l: 'english', cc: 'IN' },
       timeout: 8000
     });
-    const items = res.data?.items || [];
-    // Filtra solo i risultati che hanno lo stesso nome base (case insensitive, partial match)
-    const baseNameLower = baseName.toLowerCase();
-    const related = items.filter(g => g.name.toLowerCase().includes(baseNameLower) || baseNameLower.includes(g.name.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim()));
-    // Includi sempre il gioco base, rimuovi duplicati
+    const items = searchRes.data?.items || [];
+
+    // Considera "edition" ogni risultato il cui nome inizia con o contiene il nome base
+    // e ha parole tipiche di edition (Standard, Deluxe, Ultimate, GOTY, Complete, Gold, Premium, Bundle, Pack, Edition)
+    const editionKeywords = /standard|deluxe|ultimate|goty|complete|gold|premium|bundle|pack|edition|enhanced|definitive|anniversary|digital|collector|legacy|remastered/i;
+    const baseNameNorm = baseName.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    const editions = items.filter(g => {
+      const gNameNorm = g.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      // Deve contenere il nome base (normalizzato) E avere una keyword edition, OPPURE essere il gioco base stesso
+      const containsBase = gNameNorm.includes(baseNameNorm) || baseNameNorm.includes(gNameNorm);
+      const hasEditionKeyword = editionKeywords.test(g.name);
+      return containsBase && (hasEditionKeyword || g.id === baseAppid);
+    });
+
+    // Rimuovi duplicati e includi sempre il gioco base
     const seen = new Set();
-    const editions = [];
-    for (const g of related) {
+    const result = [];
+    // Prima il gioco base
+    if (!seen.has(baseAppid)) {
+      seen.add(baseAppid);
+      result.push({ appid: baseAppid, name: baseName });
+    }
+    for (const g of editions) {
       if (!seen.has(g.id)) {
         seen.add(g.id);
-        editions.push({ appid: g.id, name: g.name });
+        result.push({ appid: g.id, name: g.name });
       }
     }
-    // Se c'è solo l'appid base, nessuna edition trovata
-    if (editions.length <= 1) return null;
-    return editions.slice(0, 5);
+
+    if (result.length <= 1) return null; // solo il gioco base, nessuna edition
+    return result.slice(0, 5);
   } catch (err) {
     console.error('Steam edition search error:', err.message);
     return null;
